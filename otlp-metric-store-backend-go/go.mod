@@ -1,10 +1,12 @@
-module dash0.com/otlp-log-processor-backend
+module dash0.com/otlp-metric-store-backend
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.43.0
+	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/testcontainers/testcontainers-go v0.40.0
+	github.com/zeebo/xxh3 v1.1.0
 	go.opentelemetry.io/contrib/bridges/otelslog v0.16.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.66.0
 	go.opentelemetry.io/otel v1.41.0
@@ -17,6 +19,7 @@ require (
 	go.opentelemetry.io/otel/sdk/log v0.17.0
 	go.opentelemetry.io/otel/sdk/metric v1.41.0
 	go.opentelemetry.io/proto/otlp v1.9.0
+	golang.org/x/sync v0.25.0
 	google.golang.org/grpc v1.79.1
 )
 
@@ -48,6 +51,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.2 // indirect
 	github.com/klauspost/compress v1.18.3 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/magiconair/properties v1.8.10 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect

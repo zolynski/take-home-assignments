@@ -47,14 +47,39 @@ Build the application:
 go build ./...
 ```
 
-Run the application:
+Start ClickHouse:
 ```shell
-go run ./...
+docker run -d --name clickhouse -p 9000:9000 \
+  -e CLICKHOUSE_USER=default -e CLICKHOUSE_PASSWORD=secret \
+  clickhouse/clickhouse-server:26.2
 ```
 
-Run tests
+Run the application (creates its tables on startup):
+```shell
+CLICKHOUSE_PASSWORD=secret go run . -clickhouseAddr localhost:9000
+```
+
+| Flag | Default | |
+|---|---|---|
+| `-listenAddr` | `localhost:4317` | OTLP gRPC listen address |
+| `-maxReceiveMessageSize` | `16777216` | Max gRPC message size in bytes |
+| `-clickhouseAddr` | `localhost:9000` | ClickHouse native protocol address |
+| `-clickhouseDatabase` | `default` | ClickHouse database |
+| `-clickhouseUser` | `default` | ClickHouse user; the password comes from `CLICKHOUSE_PASSWORD` |
+| `-seriesCacheSize` | `1000000` | (series, day) pairs remembered as already written |
+| `-maxDataPointAge` | `168h` | Data points older than this are rejected |
+| `-maxDataPointAhead` | `10m` | Data points further in the future than this are rejected |
+| `-insertBatchMaxRows` | `100000` | Rows of concurrent exports combined into one insert before it is sent |
+| `-insertBatchMaxDelay` | `200ms` | The longest an insert waits for more rows |
+
+Run unit tests:
 ```shell
 go test ./...
+```
+
+Run integration tests (needs Docker; starts ClickHouse with testcontainers):
+```shell
+go test -tags integration ./...
 ```
 
 ## References

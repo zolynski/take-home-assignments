@@ -9,39 +9,41 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
-// GaugeRow represents a single gauge data point for ClickHouse insertion.
-type GaugeRow struct {
-	ResourceAttributes    map[string]string
-	ResourceSchemaUrl     string
-	ScopeName             string
-	ScopeVersion          string
-	ScopeAttributes       map[string]string
-	ScopeDroppedAttrCount uint32
-	ScopeSchemaUrl        string
-	ServiceName           string
-	MetricName            string
-	MetricDescription     string
-	MetricUnit            string
-	Attributes            map[string]string
-	StartTimeUnix         time.Time
-	TimeUnix              time.Time
-	Value                 float64
-	Flags                 uint32
-}
-
-// SumRow represents a single sum data point for ClickHouse insertion.
-type SumRow struct {
-	GaugeRow
+// SeriesRow describes one series on one UTC day.
+type SeriesRow struct {
+	SeriesID               SeriesID
+	Day                    time.Time
+	ResourceAttributes     map[string]string
+	ResourceSchemaUrl      string
+	ScopeName              string
+	ScopeVersion           string
+	ScopeAttributes        map[string]string
+	ScopeDroppedAttrCount  uint32
+	ScopeSchemaUrl         string
+	ServiceName            string
+	MetricName             string
+	MetricDescription      string
+	MetricUnit             string
+	MetricType             string
 	AggregationTemporality int32
 	IsMonotonic            bool
+	Attributes             map[string]string
 }
 
-// MetricsStore defines the interface for storing metrics in ClickHouse.
+// DataPointRow is a single gauge or sum data point referencing its series.
+type DataPointRow struct {
+	SeriesID      SeriesID
+	StartTimeUnix time.Time
+	TimeUnix      time.Time
+	Value         float64
+	Flags         uint32
+}
+
+// MetricsStore persists series and data points.
 type MetricsStore interface {
-	CreateTables(ctx context.Context) error
-	InsertGauge(ctx context.Context, rows []GaugeRow) error
-	InsertSum(ctx context.Context, rows []SumRow) error
-	Close() error
+	InsertSeries(ctx context.Context, rows []SeriesRow) error
+	InsertGauge(ctx context.Context, rows []DataPointRow) error
+	InsertSum(ctx context.Context, rows []DataPointRow) error
 }
 
 // ClickHouseMetricsStore implements MetricsStore using a ClickHouse connection.
@@ -62,6 +64,7 @@ func NewClickHouseMetricsStore(ctx context.Context, addr string, database string
 			"max_execution_time": 60,
 		},
 		DialTimeout: 5 * time.Second,
+		Compression: &clickhouse.Compression{Method: clickhouse.CompressionLZ4},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("opening clickhouse connection: %w", err)
@@ -73,16 +76,13 @@ func NewClickHouseMetricsStore(ctx context.Context, addr string, database string
 	return &ClickHouseMetricsStore{conn: conn}, nil
 }
 
-// CreateTables executes DDL for all 5 metric tables.
+// CreateTables creates any missing tables.
 func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
-	ddls := []string{
-		createGaugeTableSQL,
-		createSumTableSQL,
-		createHistogramTableSQL,
-		createExponentialHistogramTableSQL,
-		createSummaryTableSQL,
-	}
-	for _, ddl := range ddls {
+	for _, ddl := range []string{
+		createSeriesTableSQL,
+		fmt.Sprintf(createDataPointTableSQL, gaugeTable),
+		fmt.Sprintf(createDataPointTableSQL, sumTable),
+	} {
 		if err := s.conn.Exec(ctx, ddl); err != nil {
 			return fmt.Errorf("creating table: %w", err)
 		}
@@ -90,14 +90,17 @@ func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 	return nil
 }
 
-// InsertGauge batch-inserts gauge rows into otel_metrics_gauge.
-func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeRow) error {
-	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_gauge")
+// InsertSeries batch-inserts series rows into otel_metrics_series.
+func (s *ClickHouseMetricsStore) InsertSeries(ctx context.Context, rows []SeriesRow) error {
+	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO "+seriesTable)
 	if err != nil {
-		return fmt.Errorf("preparing gauge batch: %w", err)
+		return fmt.Errorf("preparing series batch: %w", err)
 	}
+	defer batch.Close()
 	for _, r := range rows {
 		if err := batch.Append(
+			r.SeriesID.BigInt(),
+			r.Day,
 			r.ResourceAttributes,
 			r.ResourceSchemaUrl,
 			r.ScopeName,
@@ -109,46 +112,42 @@ func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeRo
 			r.MetricName,
 			r.MetricDescription,
 			r.MetricUnit,
+			r.MetricType,
+			r.AggregationTemporality,
+			r.IsMonotonic,
 			r.Attributes,
-			r.StartTimeUnix,
-			r.TimeUnix,
-			r.Value,
-			r.Flags,
 		); err != nil {
-			return fmt.Errorf("appending gauge row: %w", err)
+			return fmt.Errorf("appending series row: %w", err)
 		}
 	}
 	return batch.Send()
 }
 
-// InsertSum batch-inserts sum rows into otel_metrics_sum.
-func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []SumRow) error {
-	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_sum")
+// InsertGauge batch-inserts data points into otel_metrics_gauge.
+func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []DataPointRow) error {
+	return s.insertDataPoints(ctx, gaugeTable, rows)
+}
+
+// InsertSum batch-inserts data points into otel_metrics_sum.
+func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []DataPointRow) error {
+	return s.insertDataPoints(ctx, sumTable, rows)
+}
+
+func (s *ClickHouseMetricsStore) insertDataPoints(ctx context.Context, table string, rows []DataPointRow) error {
+	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO "+table)
 	if err != nil {
-		return fmt.Errorf("preparing sum batch: %w", err)
+		return fmt.Errorf("preparing %s batch: %w", table, err)
 	}
+	defer batch.Close()
 	for _, r := range rows {
 		if err := batch.Append(
-			r.ResourceAttributes,
-			r.ResourceSchemaUrl,
-			r.ScopeName,
-			r.ScopeVersion,
-			r.ScopeAttributes,
-			r.ScopeDroppedAttrCount,
-			r.ScopeSchemaUrl,
-			r.ServiceName,
-			r.MetricName,
-			r.MetricDescription,
-			r.MetricUnit,
-			r.Attributes,
+			r.SeriesID.BigInt(),
 			r.StartTimeUnix,
 			r.TimeUnix,
 			r.Value,
 			r.Flags,
-			r.AggregationTemporality,
-			r.IsMonotonic,
 		); err != nil {
-			return fmt.Errorf("appending sum row: %w", err)
+			return fmt.Errorf("appending %s row: %w", table, err)
 		}
 	}
 	return batch.Send()
