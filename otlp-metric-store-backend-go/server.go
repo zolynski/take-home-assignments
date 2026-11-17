@@ -16,6 +16,8 @@ import (
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 var (
@@ -96,11 +98,15 @@ func run() (err error) {
 		grpc.Creds(insecure.NewCredentials()),
 	)
 	colmetricspb.RegisterMetricsServiceServer(grpcServer, server)
+	healthServer := health.NewServer()
+	healthpb.RegisterHealthServer(grpcServer, healthServer)
 
 	// Let in-flight exports finish their inserts before the store is closed.
 	go func() {
 		<-ctx.Done()
 		slog.Info("Shutting down gRPC server")
+		// Report NOT_SERVING first, so load balancers stop sending exports while the in-flight ones finish.
+		healthServer.Shutdown()
 		grpcServer.GracefulStop()
 	}()
 

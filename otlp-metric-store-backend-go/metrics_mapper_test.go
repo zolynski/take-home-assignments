@@ -221,3 +221,28 @@ func TestMapMetrics_StoresStalenessMarkers(t *testing.T) {
 		}
 	}
 }
+
+// BenchmarkMapMetrics maps a request shaped like a collector's batch: 10 resources with 50 metrics of
+// 20 series each, 10,000 data points in all.
+func BenchmarkMapMetrics(b *testing.B) {
+	var rms []*metricspb.ResourceMetrics
+	for r := range 10 {
+		var metrics []*metricspb.Metric
+		for m := range 50 {
+			points := make([]*metricspb.NumberDataPoint, 20)
+			for p := range points {
+				points[p] = doublePoint(nanos(testTime), float64(p), strAttr("cpu", fmt.Sprint(p)), strAttr("state", "user"))
+			}
+			metrics = append(metrics, gaugeMetric(fmt.Sprintf("metric.%d", m), points...))
+		}
+		rms = append(rms, resourceMetrics([]*commonpb.KeyValue{
+			strAttr("service.name", "checkout"), strAttr("host.name", fmt.Sprintf("host-%d", r)), strAttr("k8s.pod.uid", fmt.Sprintf("pod-%d", r)),
+		}, metrics...))
+	}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		MapMetrics(rms, testWindow)
+	}
+	b.ReportMetric(float64(b.N*10_000)/b.Elapsed().Seconds(), "data_points/s")
+}

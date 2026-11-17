@@ -40,6 +40,82 @@ Feel free to use the existing scaffoling in this folder. Of course, you can also
   - Include signals / events to help in debugging
 - Assume that this application will be deployed to production. Build it accordingly.
 
+## Solution
+
+### Terminology
+- **Series**: everything that describes a data point apart from its timestamps, value and flags — resource,
+  scope, metric (name, description, unit, type, temporality, monotonicity) and data point attributes.
+- **Series ID**: a 128-bit XXH3 hash of a canonical, type-tagged encoding of the series. Attribute order
+  does not matter; any change to an attribute, including a resource attribute, makes a new series.
+- **Data point**: a series ID with a start time, time, value and flags.
+
+### Tables
+
+| Table | Holds | Partition | Sort key |
+|---|---|---|---|
+| `otel_metrics_series` | One row per series per UTC day it has data points | `Day` | `ServiceName, MetricName, SeriesId, Day` |
+| `otel_metrics_gauge`, `otel_metrics_sum` | `SeriesId, StartTimeUnix, TimeUnix, Value, Flags` | `toDate(TimeUnix)` | `toStartOfHour(TimeUnix), SeriesId, TimeUnix` |
+
+- **The reference is the series ID.** It is computed from the content, so any number of instances agree on it
+  without coordinating, and nothing has to be looked up before a data point can be written.
+- **No table is ever scanned in full for a time-bounded query.** All three are partitioned by day, so a query
+  reads only the days in its window; within a day, the data point tables' leading hour bucket lets a query
+  filtered only by time skip the hours outside it. The integration tests run the queries below with
+  ClickHouse's `force_index_by_date` and `force_primary_key`, which make it refuse a query that would not prune.
+- **Series rows repeat per day** instead of being written once, so the series table can be pruned by time
+  like the others, and so a series' metadata as of a given day is always next to its data points.
+  Cardinality is low, so this costs little.
+- **All tables are `ReplacingMergeTree`.** A series row written twice in a day (cache misses, restarts,
+  several instances) and a data point an exporter retries collapse into one; read with `FINAL` to see them
+  collapsed before ClickHouse merges.
+- Histogram, exponential histogram and summary metrics are not stored.
+
+### Write path
+1. `Export` maps the request into series rows and data point rows, rejecting data points without a value,
+   without a timestamp, or with one outside `-maxDataPointAge`/`-maxDataPointAhead` (which also bounds how
+   many day partitions one insert can create). Rejections are reported in OTLP `partial_success`.
+2. An LRU cache of (series, day) pairs drops series rows already written today, so in steady state almost
+   no series rows are written.
+3. New series rows are inserted first, so a stored data point never references a series whose insert failed;
+   then gauge and sum data points are inserted concurrently.
+4. Inserts from concurrent exports are combined per table (`-insertBatchMaxRows`, `-insertBatchMaxDelay`),
+   because ClickHouse creates a part per insert. An export is acknowledged only once its rows are stored;
+   if an insert fails it returns `UNAVAILABLE`, which exporters retry and which the tables make safe to retry.
+
+### Querying
+Gauge values of one metric within a time window, with their series' attributes:
+```sql
+SELECT s.ServiceName, s.ResourceAttributes, s.Attributes, p.TimeUnix, p.Value
+FROM otel_metrics_gauge AS p FINAL
+INNER JOIN (
+    SELECT SeriesId, ServiceName, ResourceAttributes, Attributes
+    FROM otel_metrics_series FINAL
+    WHERE Day BETWEEN toDate({from:DateTime64(9)}) AND toDate({to:DateTime64(9)})
+      AND MetricName = 'cpu.utilization'
+    LIMIT 1 BY SeriesId
+) AS s ON p.SeriesId = s.SeriesId
+WHERE p.TimeUnix BETWEEN {from:DateTime64(9)} AND {to:DateTime64(9)}
+ORDER BY p.TimeUnix
+```
+The series side must be filtered by the same days as the data points; `LIMIT 1 BY SeriesId` keeps one of a
+series' per-day rows. A staleness marker (no recorded value) is stored with `Value = NaN`.
+
+### Operability
+- **Metrics** (`com.dash0.homeexercise.*`): export requests; data points received, stored and rejected, by
+  metric type and rejection reason; series cache hits and misses; series rows written; ClickHouse insert
+  duration, rows per insert and failed inserts, by table.
+- **Health**: the standard gRPC health service, which reports `NOT_SERVING` once shutdown starts.
+- **Shutdown**: on SIGTERM, in-flight exports finish and the last batches are inserted before exit.
+
+### Throughput
+`go test -run '^$' -bench MapMetrics .` maps a 10,000 data point request at about 2 million data points per
+second on one core of an Apple M3 Pro. Mapping builds a row for every series in a request before the
+cache is consulted; skipping that for cached series would cut most of its allocations.
+
+### Not covered
+- TLS for clients and for ClickHouse.
+- Retention (TTL) and schema migrations: tables are created if missing and never altered.
+
 ## Usage
 
 Build the application:

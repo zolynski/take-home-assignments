@@ -27,15 +27,15 @@ func init() {
 	exportRequestsCounter = must(meter.Int64Counter("com.dash0.homeexercise.export.requests",
 		metric.WithDescription("The number of OTLP metrics export requests received"),
 		metric.WithUnit("{request}")))
-	dataPointsReceived = must(meter.Int64Counter("com.dash0.homeexercise.datapoints.received",
+	dataPointsReceived = must(meter.Int64Counter("com.dash0.homeexercise.data_points.received",
 		metric.WithDescription("The number of data points received, by metric type"),
-		metric.WithUnit("{datapoint}")))
-	dataPointsStored = must(meter.Int64Counter("com.dash0.homeexercise.datapoints.stored",
+		metric.WithUnit("{data_point}")))
+	dataPointsStored = must(meter.Int64Counter("com.dash0.homeexercise.data_points.stored",
 		metric.WithDescription("The number of data points written to ClickHouse, by metric type"),
-		metric.WithUnit("{datapoint}")))
-	dataPointsRejected = must(meter.Int64Counter("com.dash0.homeexercise.datapoints.rejected",
+		metric.WithUnit("{data_point}")))
+	dataPointsRejected = must(meter.Int64Counter("com.dash0.homeexercise.data_points.rejected",
 		metric.WithDescription("The number of data points rejected as invalid or unsupported, by metric type and reason"),
-		metric.WithUnit("{datapoint}")))
+		metric.WithUnit("{data_point}")))
 	seriesCacheLookups = must(meter.Int64Counter("com.dash0.homeexercise.series.cache.lookups",
 		metric.WithDescription("Series cache lookups, by result; a miss means the series row is written for that day"),
 		metric.WithUnit("{lookup}")))
