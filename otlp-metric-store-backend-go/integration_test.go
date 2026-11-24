@@ -59,17 +59,20 @@ func setupClickHouse(t *testing.T) (*ClickHouseMetricsStore, func()) {
 
 // gaugeInWindowSQL reads gauge values for one metric in a time window. Both tables are filtered by the
 // window's days so neither is scanned beyond it; LIMIT 1 BY collapses the per-day rows of a series,
-// and FINAL the data points an exporter sent more than once.
+// and FINAL the data points an exporter sent more than once. The IN lets the data point table's primary
+// key skip other series, which the join alone would not.
 const gaugeInWindowSQL = `
-SELECT s.ServiceName, s.MetricName, s.Attributes['cpu'], p.TimeUnix, p.Value
-FROM otel_metrics_gauge AS p FINAL
-INNER JOIN (
+WITH series AS (
     SELECT SeriesId, ServiceName, MetricName, Attributes
     FROM otel_metrics_series FINAL
     WHERE Day BETWEEN toDate($1) AND toDate($2) AND MetricName = $3
     LIMIT 1 BY SeriesId
-) AS s ON p.SeriesId = s.SeriesId
+)
+SELECT s.ServiceName, s.MetricName, s.Attributes['cpu'], p.TimeUnix, p.Value
+FROM otel_metrics_gauge AS p FINAL
+INNER JOIN series AS s ON p.SeriesId = s.SeriesId
 WHERE p.TimeUnix BETWEEN $1 AND $2
+  AND p.SeriesId IN (SELECT SeriesId FROM series)
 ORDER BY p.TimeUnix`
 
 func TestClickHouseStore(t *testing.T) {
@@ -141,19 +144,16 @@ func TestClickHouseStore(t *testing.T) {
 
 	t.Run("time-bounded queries use partition and primary key pruning", func(t *testing.T) {
 		// ClickHouse refuses to run these queries if they would read every partition or ignore the primary key.
-		forceIndexes := clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{
-			"force_index_by_date": 1,
-		}))
-		rows, err := store.conn.Query(forceIndexes, gaugeInWindowSQL, day1.Add(-time.Hour), day1.Add(time.Hour), "cpu.utilization")
-		if err != nil {
-			t.Fatalf("join query does not prune by date: %v", err)
-		}
-		rows.Close()
-
 		forcePrimaryKey := clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{
 			"force_index_by_date": 1,
 			"force_primary_key":   1,
 		}))
+		rows, err := store.conn.Query(forcePrimaryKey, gaugeInWindowSQL, day1.Add(-time.Hour), day1.Add(time.Hour), "cpu.utilization")
+		if err != nil {
+			t.Fatalf("join query does not prune by date and primary key: %v", err)
+		}
+		rows.Close()
+
 		for _, table := range []string{gaugeTable, sumTable} {
 			var count uint64
 			err := store.conn.QueryRow(forcePrimaryKey, "SELECT count() FROM "+table+" WHERE TimeUnix BETWEEN $1 AND $2",

@@ -85,20 +85,25 @@ Feel free to use the existing scaffoling in this folder. Of course, you can also
 ### Querying
 Gauge values of one metric within a time window, with their series' attributes:
 ```sql
-SELECT s.ServiceName, s.ResourceAttributes, s.Attributes, p.TimeUnix, p.Value
-FROM otel_metrics_gauge AS p FINAL
-INNER JOIN (
+WITH series AS (
     SELECT SeriesId, ServiceName, ResourceAttributes, Attributes
     FROM otel_metrics_series FINAL
     WHERE Day BETWEEN toDate({from:DateTime64(9)}) AND toDate({to:DateTime64(9)})
       AND MetricName = 'cpu.utilization'
     LIMIT 1 BY SeriesId
-) AS s ON p.SeriesId = s.SeriesId
+)
+SELECT s.ServiceName, s.ResourceAttributes, s.Attributes, p.TimeUnix, p.Value
+FROM otel_metrics_gauge AS p FINAL
+INNER JOIN series AS s ON p.SeriesId = s.SeriesId
 WHERE p.TimeUnix BETWEEN {from:DateTime64(9)} AND {to:DateTime64(9)}
+  AND p.SeriesId IN (SELECT SeriesId FROM series)
 ORDER BY p.TimeUnix
 ```
 The series side must be filtered by the same days as the data points; `LIMIT 1 BY SeriesId` keeps one of a
-series' per-day rows. A staleness marker (no recorded value) is stored with `Value = NaN`.
+series' per-day rows. The `IN` matters even though the join already matches series: ClickHouse checks an
+`IN` set against the data point table's primary key and skips granules of other series, while a join
+alone reads every data point in the window. A staleness marker (no recorded value) is stored with
+`Value = NaN`.
 
 ### Operability
 - **Metrics** (`com.dash0.homeexercise.*`): export requests; data points received, stored and rejected, by
