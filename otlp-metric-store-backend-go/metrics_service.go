@@ -62,6 +62,8 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 	slog.DebugContext(ctx, "Received ExportMetricsServiceRequest")
 	exportRequestsCounter.Add(ctx, 1)
 
+	// Split the request into series rows and data point rows. Invalid points are only counted, so one
+	// bad point doesn't fail the request; one clock reading judges every point against the same window.
 	now := m.cfg.Now()
 	mapped := MapMetrics(request.GetResourceMetrics(), TimeWindow{
 		Oldest: now.Add(-m.cfg.MaxDataPointAge),
@@ -69,6 +71,7 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 	})
 	m.recordReceived(ctx, mapped)
 
+	// Keep only series this instance hasn't stored today; in steady state that is none of them.
 	var newSeries []SeriesRow
 	for _, s := range mapped.Series {
 		if m.writtenSeries.Contains(seriesDay{ID: s.SeriesID, Day: s.Day.Unix()}) {
@@ -84,12 +87,14 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 		if err := m.store.InsertSeries(ctx, newSeries); err != nil {
 			return nil, status.Error(codes.Unavailable, err.Error())
 		}
+		// Remembered only once stored, so after a failed insert the next export writes them again.
 		for _, s := range newSeries {
 			m.writtenSeries.Add(seriesDay{ID: s.SeriesID, Day: s.Day.Unix()}, struct{}{})
 		}
 		seriesWritten.Add(ctx, int64(len(newSeries)))
 	}
 
+	// Gauge and sum points go to different tables, so their inserts don't depend on each other.
 	g, gctx := errgroup.WithContext(ctx)
 	if len(mapped.Gauge) > 0 {
 		g.Go(func() error { return m.store.InsertGauge(gctx, mapped.Gauge) })
@@ -106,6 +111,7 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 	dataPointsStored.Add(ctx, int64(len(mapped.Gauge)), metric.WithAttributes(attribute.String("metric.type", metricTypeGauge)))
 	dataPointsStored.Add(ctx, int64(len(mapped.Sum)), metric.WithAttributes(attribute.String("metric.type", metricTypeSum)))
 
+	// Rejections are reported as a partial success, which exporters log instead of retrying.
 	response := &colmetricspb.ExportMetricsServiceResponse{}
 	if rejected := mapped.RejectedCount(); rejected > 0 {
 		response.PartialSuccess = &colmetricspb.ExportMetricsPartialSuccess{

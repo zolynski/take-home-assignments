@@ -63,9 +63,11 @@ func (s *BatchingMetricsStore) InsertSum(ctx context.Context, rows []DataPointRo
 // Close inserts the rows still waiting and stops batching. The wrapped store stays open.
 func (s *BatchingMetricsStore) Close() {
 	s.closeOnce.Do(func() {
+		// Closing wakes each run loop and every add still waiting to hand over rows.
 		close(s.series.closed)
 		close(s.gauge.closed)
 		close(s.sum.closed)
+		// Each run closes stopped once its last batch is inserted.
 		<-s.series.stopped
 		<-s.gauge.stopped
 		<-s.sum.stopped
@@ -106,7 +108,9 @@ func (b *batcher[T]) add(ctx context.Context, rows []T) error {
 	if len(rows) == 0 {
 		return nil
 	}
+	// Buffered, so flush can deliver the result even if this export has stopped waiting.
 	done := make(chan error, 1)
+	// Blocks while the batcher is inserting the previous batch: exports wait instead of piling up rows.
 	select {
 	case b.items <- batchItem[T]{rows: rows, done: done}:
 	case <-ctx.Done():
@@ -125,6 +129,7 @@ func (b *batcher[T]) add(ctx context.Context, rows []T) error {
 
 func (b *batcher[T]) run() {
 	defer close(b.stopped)
+	// One batch at a time: collect, insert, repeat. Rows collected before close are still inserted.
 	for {
 		rows, waiters, closed := b.collect()
 		if len(waiters) > 0 {
@@ -138,10 +143,12 @@ func (b *batcher[T]) run() {
 
 // collect waits for the first rows, then gathers more until the batch is full or MaxDelay has passed.
 func (b *batcher[T]) collect() (rows []T, waiters []chan<- error, closed bool) {
+	// Nil until the first rows arrive, and a nil channel never fires: an idle batcher has no timer.
 	var deadline <-chan time.Time
 	for len(rows) < b.cfg.MaxRows {
 		select {
 		case item := <-b.items:
+			// The delay counts from the first rows, so none wait longer than MaxDelay for others.
 			if deadline == nil {
 				deadline = time.After(b.cfg.MaxDelay)
 			}
@@ -171,6 +178,7 @@ func (b *batcher[T]) flush(rows []T, waiters []chan<- error) {
 			slog.Int("rows", len(rows)), slog.Int("exports", len(waiters)), slog.Any("error", err))
 		err = fmt.Errorf("inserting into %s: %w", b.table, err)
 	}
+	// Every export in the batch gets the same outcome; done's buffer means this never blocks.
 	for _, done := range waiters {
 		done <- err
 	}

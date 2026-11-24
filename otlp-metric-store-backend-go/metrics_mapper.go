@@ -69,16 +69,20 @@ type seriesDay struct {
 // missing or outside accepted are rejected.
 func MapMetrics(resourceMetrics []*metricspb.ResourceMetrics, accepted TimeWindow) MappedMetrics {
 	out := MappedMetrics{Rejected: map[Rejection]int64{}}
+	// A request usually carries many points of one series; its series row is built only once.
 	seen := map[seriesDay]struct{}{}
+	// One encoder for the whole request, so its buffer is reused for every hash.
 	var enc identityEncoder
 
 	for _, rm := range resourceMetrics {
+		// Each level's hash includes the one above, so a resource is encoded once, not once per data point.
 		resource := rm.GetResource()
 		enc.reset()
 		enc.attributes(resource.GetAttributes())
 		enc.string(rm.GetSchemaUrl())
 		resourceID := enc.sum()
 		svcName := serviceName(resource)
+		// Built once and shared by every series row of this resource; nothing modifies it afterwards.
 		resAttrs := kvToMap(resource.GetAttributes())
 
 		for _, sm := range rm.GetScopeMetrics() {
@@ -108,12 +112,15 @@ func MapMetrics(resourceMetrics []*metricspb.ResourceMetrics, accepted TimeWindo
 					metricType, dataPoints, target = metricTypeSum, data.Sum.GetDataPoints(), &out.Sum
 					temporality, isMonotonic = data.Sum.GetAggregationTemporality(), data.Sum.GetIsMonotonic()
 				default:
+					// Counted rather than dropped silently, so the sender sees them in partial_success.
 					if unsupported, n := unsupportedMetric(metric); n > 0 {
 						out.Rejected[Rejection{unsupported, rejectReasonUnsupportedType}] += n
 					}
 					continue
 				}
 
+				// Temporality and monotonicity are part of the identity, so a metric sent both as delta
+				// and as cumulative never mixes its values in one series.
 				enc.reset()
 				enc.id(scopeID)
 				enc.string(metric.GetName())
@@ -135,6 +142,7 @@ func MapMetrics(resourceMetrics []*metricspb.ResourceMetrics, accepted TimeWindo
 					enc.attributes(dp.GetAttributes())
 					id := enc.sum()
 
+					// The series row belongs to the data point's UTC day, the same day partition its data point lands in.
 					timeUnix := nanosToTime(dp.GetTimeUnixNano())
 					day := utcDay(timeUnix)
 					key := seriesDay{ID: id, Day: day.Unix()}
