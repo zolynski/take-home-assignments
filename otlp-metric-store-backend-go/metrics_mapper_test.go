@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"runtime"
 	"testing"
 	"time"
 
+	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 var testTime = time.Date(2026, 3, 4, 12, 0, 0, 0, time.UTC)
@@ -240,9 +243,26 @@ func BenchmarkMapMetrics(b *testing.B) {
 		}, metrics...))
 	}
 
-	b.ReportAllocs()
+	const dataPoints = 10 * 50 * 20
+	requestMB := float64(proto.Size(&colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: rms})) / 1e6
+	b.Logf("one op maps one export request: 10 resources x 50 metrics x 20 series = %d data points, %.2f MB as protobuf",
+		dataPoints, requestMB)
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
 	for b.Loop() {
 		MapMetrics(rms, testWindow)
 	}
-	b.ReportMetric(float64(b.N*10_000)/b.Elapsed().Seconds(), "data_points/s")
+	runtime.ReadMemStats(&after)
+
+	n, seconds := float64(b.N), b.Elapsed().Seconds()
+	// Zero hides the built-in ns/op; allocations are counted here instead of by ReportAllocs, whose
+	// B/op and allocs/op can't be shown in other units.
+	b.ReportMetric(0, "ns/op")
+	b.ReportMetric(seconds*1e3/n, "ms/op")
+	b.ReportMetric(dataPoints, "data_points/op")
+	b.ReportMetric(requestMB, "request_MB/op")
+	b.ReportMetric(n*dataPoints/seconds/1e6, "M_data_points/s")
+	b.ReportMetric(float64(after.TotalAlloc-before.TotalAlloc)/n/1e6, "MB/op")
+	b.ReportMetric(float64(after.Mallocs-before.Mallocs)/n, "allocations/op")
 }
